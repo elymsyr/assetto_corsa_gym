@@ -9,11 +9,17 @@ class BrakeMap:
         self.y_points = y_points
         self.initialize(self.x_points, self.y_points, self.kind)
 
-    def initialize(self, x_points, y_points, kind='cubic'):
-        self.y_interp_func = interp1d(x_points, y_points, kind=kind, fill_value="extrapolate")
+    @staticmethod
+    def _monotonic(a, b, kind):
+        """interp1d needs strictly increasing, duplicate-free input: sort and average ties."""
+        s = pd.Series(b, dtype=float).groupby(pd.Series(a, dtype=float)).mean().sort_index()
+        if len(s) < 4 and kind == 'cubic':
+            kind = 'linear'  # not enough distinct points for a cubic spline
+        return interp1d(s.index.values, s.values, kind=kind, fill_value="extrapolate")
 
-        # Assuming y_points are sorted or the function is mostly monotonic for x(y) interpolation
-        self.x_interp_func = interp1d(y_points, x_points, kind=kind, fill_value="extrapolate")
+    def initialize(self, x_points, y_points, kind='cubic'):
+        self.y_interp_func = self._monotonic(x_points, y_points, kind)
+        self.x_interp_func = self._monotonic(y_points, x_points, kind)
 
     def get_y(self, x):
         x = np.clip(x, -1, 1)

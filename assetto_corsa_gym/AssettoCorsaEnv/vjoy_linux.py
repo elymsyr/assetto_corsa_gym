@@ -1,5 +1,12 @@
 import struct
-from evdev import InputDevice, list_devices
+from evdev import InputDevice, list_devices, ecodes
+
+# Must match the AXLE numbers in windows-libs/Vjoy_linux.ini, which are dinput axis
+# indices: AC/wine numbers the pad's ABS codes in order, so ABS_X=0, ABS_Y=1, ABS_Z=2,
+# ABS_RX=3. The preset uses the 16-bit sticks (0/1/3), not the 8-bit triggers.
+ABS_STEER = ecodes.ABS_X    # AXLE 0
+ABS_GAS = ecodes.ABS_Y      # AXLE 1
+ABS_BRAKE = ecodes.ABS_RX   # AXLE 3
 
 def find_xbox360_controller():
     for path in list_devices():
@@ -15,10 +22,14 @@ class vJoy:
         self.acquired = False
         self.js_path = "/dev/input/js0"
         self.event_path = find_xbox360_controller()
+        self.abs_range = {}
 
     def open(self):
         """Open the virtual joystick device"""
         try:
+            # ranges differ per device (sticks are signed 16 bit, triggers are often 0..255)
+            self.abs_range = {c: (a.min, a.max) for c, a in
+                              InputDevice(self.event_path).capabilities().get(ecodes.EV_ABS, [])}
             self.device = open(self.event_path, 'wb')
             self.acquired = True
             return True
@@ -64,6 +75,12 @@ class vJoy:
         self.device.write(event)
         self.device.flush()
 
+    def _send_abs(self, code, unit):
+        """unit in [0, 1] -> the axis' own min..max range"""
+        lo, hi = self.abs_range.get(code, (-32768, 32767))
+        value = int(round(lo + min(max(unit, 0.), 1.) * (hi - lo)))
+        self._send_event(0x03, code, max(lo, min(hi, value)))  # EV_ABS
+
     def update(self, joystickPosition):
         """Update the joystick state based on the provided position structure"""
         if not self.device or not self.acquired:
@@ -73,36 +90,10 @@ class vJoy:
             # Unpack the joystick position structure
             values = struct.unpack("BlllllllllllllllllllIIII", joystickPosition)
 
-            # EV_ABS for absolute axes events
-            EV_REL = 0x02  # For steering
-            EV_ABS = 0x03
-
-            # Axis codes
-            ABS_X = 0x00  # Left stick X (Steering)
-            # REL_X = 0x00   # Steering (now using relative movement)
-            # ABS_RZ = 0x05 # Right trigger (Throttle)
-            # ABS_Z = 0x02  # Left trigger (Brake)
-            ABS_GAS = 0x01
-            ABS_BRAKE = 0x03
-
-            # Map steering (wAxisX)
-            steer_value = values[4]
-            # WARNING: the specific value may differ for different machines
-            # Map 0-32768 to -32768 to 32767
-            scaled_steer = int(((steer_value / 32768) * 2 - 1) * 32767)
-            # Ensure the value stays within -32768 to 32767
-            scaled_steer = max(-32768, min(32767, scaled_steer))
-            self._send_event(EV_ABS, ABS_X, scaled_steer)
-
-            # Map throttle (wAxisY) from 0-32768 to 0-255
-            throttle_value = int(((values[5] / 32768.0) * 2 - 1) * 32767)
-            throttle_value = max(-32768, min(32767, throttle_value))
-            self._send_event(EV_ABS, ABS_GAS, throttle_value)
-
-            # Map brake (wAxisZ) from 0-32768 to 0-255
-            brake_value = int(((values[6] / 32768.0) * 2 - 1) * 32767)
-            brake_value = max(-32768, min(32767, brake_value))
-            self._send_event(EV_ABS, ABS_BRAKE, brake_value)
+            # wAxisX/Y/Z arrive as 0..32768 (see Controls.setJoy)
+            self._send_abs(ABS_STEER, values[4] / 32768.)
+            self._send_abs(ABS_GAS, values[5] / 32768.)
+            self._send_abs(ABS_BRAKE, values[6] / 32768.)
 
             # Send a synchronization event
             self._send_event(0, 0, 0)
